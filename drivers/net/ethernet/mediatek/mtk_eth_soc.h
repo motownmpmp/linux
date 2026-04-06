@@ -22,6 +22,19 @@
 #include <linux/bpf_trace.h>
 #include "mtk_ppe.h"
 
+
+/* CUSTOM: Definewert für Anzahl PDMA-Deskriptorringe */
+#define MTK_PDMA_TX_RING_NUM	4
+
+/* CUSTOM: Pro-MAC TX-Backend einführen */
+enum mtk_tx_backend {
+	MTK_TX_BACKEND_QDMA = 0,
+	MTK_TX_BACKEND_PDMA = 1,
+};
+
+/* CUSTOM: Custom Define */
+#define MTK_INVALID_REG		0
+
 #define MTK_MAX_DSA_PORTS	7
 #define MTK_DSA_PORT_MASK	GENMASK(2, 0)
 
@@ -1153,6 +1166,13 @@ struct mtk_reg_map {
 		u32	irq_mask;	/* interrupt mask */
 		u32	adma_rx_dbg0;
 		u32	int_grp;
+
+		/* === Custom BEGIN ===  */
+		u32	tx_base_ptr[MTK_PDMA_TX_RING_NUM];
+		u32	tx_max_cnt[MTK_PDMA_TX_RING_NUM];
+		u32	tx_ctx_idx[MTK_PDMA_TX_RING_NUM];
+		u32	tx_dtx_idx[MTK_PDMA_TX_RING_NUM];
+		/* === Custom END ===  */
 	} pdma;
 	struct {
 		u32	qtx_cfg;	/* tx queue configuration */
@@ -1312,6 +1332,10 @@ struct mtk_eth {
 	struct mtk_tx_ring		tx_ring;
 	struct mtk_rx_ring		rx_ring[MTK_MAX_RX_RING_NUM];
 	struct mtk_rx_ring		rx_ring_qdma;
+
+	/* CUSTOM: Unterstützung von 4 PDMA TX-Deskriptorringe */
+	struct mtk_tx_ring		tx_ring_pdma[MTK_7981_PDMA_NUM_TX_RING];
+
 	struct napi_struct		tx_napi;
 	struct napi_struct		rx_napi;
 	void				*scratch_ring;
@@ -1378,6 +1402,9 @@ struct mtk_mac {
 	int				hwlro_ip_cnt;
 	unsigned int			syscfg0;
 	struct notifier_block		device_notifier;
+
+	/* CUSTOM: Pro-MAC TX-Backend einführen */
+	enum mtk_tx_backend		tx_backend;
 };
 
 /* the struct describing the SoC. these are declared in the soc_xyz.c files */

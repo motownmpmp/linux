@@ -57,6 +57,18 @@ static const struct mtk_reg_map mtk_reg_map = {
 		.irq_mask	= 0x0a28,
 		.adma_rx_dbg0	= 0x0a38,
 		.int_grp	= 0x0a50,
+
+
+		/* === Custom BEGIN ===  */
+		.tx_base_ptr = { MTK_INVALID_REG, MTK_INVALID_REG,
+				 MTK_INVALID_REG, MTK_INVALID_REG },
+		.tx_max_cnt  = { MTK_INVALID_REG, MTK_INVALID_REG,
+				 MTK_INVALID_REG, MTK_INVALID_REG },
+		.tx_ctx_idx  = { MTK_INVALID_REG, MTK_INVALID_REG,
+				 MTK_INVALID_REG, MTK_INVALID_REG },
+		.tx_dtx_idx  = { MTK_INVALID_REG, MTK_INVALID_REG,
+				 MTK_INVALID_REG, MTK_INVALID_REG },
+		/* === Custom END ===  */
 	},
 	.qdma = {
 		.qtx_cfg	= 0x1800,
@@ -123,6 +135,17 @@ static const struct mtk_reg_map mt7986_reg_map = {
 		.irq_mask	= 0x4228,
 		.adma_rx_dbg0	= 0x4238,
 		.int_grp	= 0x4250,
+
+		/* === Custom BEGIN ===  */
+		.tx_base_ptr	= { MTK_INVALID_REG, MTK_INVALID_REG,
+				 MTK_INVALID_REG, MTK_INVALID_REG },
+		.tx_max_cnt	= { MTK_INVALID_REG, MTK_INVALID_REG,
+				 MTK_INVALID_REG, MTK_INVALID_REG },
+		.tx_ctx_idx	= { MTK_INVALID_REG, MTK_INVALID_REG,
+				 MTK_INVALID_REG, MTK_INVALID_REG },
+		.tx_dtx_idx	= { MTK_INVALID_REG, MTK_INVALID_REG,
+				 MTK_INVALID_REG, MTK_INVALID_REG },
+		/* === Custom END ===  */
 	},
 	.qdma = {
 		.qtx_cfg	= 0x4400,
@@ -285,6 +308,15 @@ static const char * const mtk_clks_source_name[] = {
 	"top_netsys_ppefb_250m_sel",
 	"top_netsys_warp_sel",
 };
+
+/* Custom: Eine zentrale Prüfung, ob PDMA-TX-Ring-Register für Ring n überhaupt gültig sind, damit man später nie blind in falsche Register schreibt..  */
+static bool mtk_has_pdma_tx_ring_regs(const struct mtk_reg_map *map, int ring)
+{
+	return ring >= 0 && ring < MTK_PDMA_TX_RING_NUM &&
+	       map->pdma.tx_base_ptr[ring] != MTK_INVALID_REG &&
+	       map->pdma.tx_max_cnt[ring]  != MTK_INVALID_REG &&
+	       map->pdma.tx_ctx_idx[ring]  != MTK_INVALID_REG;
+}
 
 void mtk_w32(struct mtk_eth *eth, u32 val, unsigned reg)
 {
@@ -2640,12 +2672,19 @@ static int mtk_tx_alloc(struct mtk_eth *eth)
 	int i, sz = soc->tx.desc_size;
 	struct mtk_tx_dma_v2 *txd;
 	int ring_size;
+
+	/* CUSTOM: Ringgröße von PDMA Tx-Deskriptorringe */
+	int pdma_ring_size;
+
 	u32 ofs, val;
 
 	if (MTK_HAS_CAPS(soc->caps, MTK_QDMA))
 		ring_size = MTK_QDMA_RING_SIZE;
 	else
 		ring_size = soc->tx.dma_size;
+
+	/* CUSTOM: Ringgröße einen Wert zuweisen */
+	pdma_ring_size = soc->tx.dma_size;
 
 	ring->buf = kzalloc_objs(*ring->buf, ring_size);
 	if (!ring->buf)
@@ -2693,6 +2732,14 @@ static int mtk_tx_alloc(struct mtk_eth *eth)
 	ring->last_free = (void *)txd;
 	ring->last_free_ptr = (u32)(ring->phys + ((ring_size - 1) * sz));
 	ring->thresh = MAX_SKB_FRAGS;
+
+
+	for (j = 0; j < MTK_7981_PDMA_NUM_TX_waRING; j++) {
+		struct mtk_tx_ring *pdma_ring = &eth->tx_ring_pdma[j];
+
+		
+	}
+
 
 	/* make sure that all changes to the dma ring are flushed before we
 	 * continue
