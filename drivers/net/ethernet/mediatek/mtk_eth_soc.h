@@ -955,6 +955,9 @@ struct mtk_tx_ring {
 	struct mtk_tx_dma *dma_pdma;	/* For MT7628/88 PDMA handling */
 	dma_addr_t phys_pdma;
 	int cpu_idx;
+
+	/* CUSTOM: Ring-ID im TX-Ring speichern */
+	int pdma_ring_no; // Welcher HW-PDMA-TX-Ring (0...3)
 };
 
 /* PDMA rx ring mode */
@@ -1334,7 +1337,10 @@ struct mtk_eth {
 	struct mtk_rx_ring		rx_ring_qdma;
 
 	/* CUSTOM: Unterstützung von 4 PDMA TX-Deskriptorringe */
-	struct mtk_tx_ring		tx_ring_pdma[MTK_7981_PDMA_NUM_TX_RING];
+	struct mtk_tx_ring		tx_ring_pdma[MTK_PDMA_TX_RING_NUM];
+
+	/* CUSTOM: ... */
+	struct mtk_tx_ring		tx_ring_qdma;
 
 	struct napi_struct		tx_napi;
 	struct napi_struct		rx_napi;
@@ -1403,7 +1409,8 @@ struct mtk_mac {
 	unsigned int			syscfg0;
 	struct notifier_block		device_notifier;
 
-	/* CUSTOM: Pro-MAC TX-Backend einführen */
+	/* CUSTOM: Backend-Auswahl pro Port */
+	enum mtk_tx_backend { MTK_TX_BACKEND_QDMA, MTK_TX_BACKEND_PDMA };
 	enum mtk_tx_backend		tx_backend;
 };
 

@@ -32,6 +32,9 @@
 #include "mtk_eth_soc.h"
 #include "mtk_wed.h"
 
+#include <asm-generic/errno-base.h>
+#include <asm-generic/errno.h>
+
 static int mtk_msg_level = -1;
 module_param_named(msg_level, mtk_msg_level, int, 0);
 MODULE_PARM_DESC(msg_level, "Message level (-1=defaults,0=none,...,16=all)");
@@ -309,7 +312,7 @@ static const char * const mtk_clks_source_name[] = {
 	"top_netsys_warp_sel",
 };
 
-/* Custom: Eine zentrale Prüfung, ob PDMA-TX-Ring-Register für Ring n überhaupt gültig sind, damit man später nie blind in falsche Register schreibt..  */
+/* CUSTOM: Eine zentrale Prüfung, ob PDMA-TX-Ring-Register für Ring n überhaupt gültig sind, damit man später nie blind in falsche Register schreibt..  */
 static bool mtk_has_pdma_tx_ring_regs(const struct mtk_reg_map *map, int ring)
 {
 	return ring >= 0 && ring < MTK_PDMA_TX_RING_NUM &&
@@ -317,6 +320,42 @@ static bool mtk_has_pdma_tx_ring_regs(const struct mtk_reg_map *map, int ring)
 	       map->pdma.tx_max_cnt[ring]  != MTK_INVALID_REG &&
 	       map->pdma.tx_ctx_idx[ring]  != MTK_INVALID_REG;
 }
+
+/* === CUSTOM: Begin === */
+static int mtk_pdma_tx_ctx_reg(const struct mtk_soc_data *soc, int ring_no)
+{
+	if (mtk_has_pdma_tx_ring_regs(soc->reg_map, ring_no))
+		return soc->reg_map->pdma.tx_ctx_idx[ring_no];
+
+	if (MTK_HAS_CAPS(soc->caps, MTK_SOC_MT7628) && ring_no == 0)
+		return MT7628_TX_CTX_IDX0;
+
+	return -EINVAL;
+}
+
+static int mtk_pdma_tx_dtx_reg(const struct mtk_soc_data *soc, int ring_no)
+{
+	if (ring_no >= 0 && ring_no < MTK_PDMA_TX_RING_NUM &&
+	    soc->reg_map->pdma.tx_dtx_idx[ring_no] != MTK_INVALID_REG)
+		return soc->reg_map->pdma.tx_dtx_idx[ring_no];
+
+	if (MTK_HAS_CAPS(soc->caps, MTK_SOC_MT7628) && ring_no == 0)
+		return MT7628_TX_DTX_IDX0;
+
+	return -EINVAL;
+}
+
+// Helper fuer Ringwahl pro MAC
+static struct mtk_tx_ring *mtk_tx_ring_for_mac(struct mtk_mac *mac)
+{
+	struct mtk_eth *eth = mac->hw;
+
+	if (mac->tx_backend == MTK_TX_BACKEND_PDMA)
+		return &eth->tx_ring_pdma[0]; /* vorerst ring0 */
+	return &eth->tx_ring_qdma;
+}
+/* === CUSTOM: End === */
+
 
 void mtk_w32(struct mtk_eth *eth, u32 val, unsigned reg)
 {
@@ -1718,7 +1757,16 @@ static int mtk_tx_map(struct sk_buff *skb, struct net_device *dev,
 
 		next_idx = NEXT_DESP_IDX(txd_to_idx(ring, txd, soc->tx.desc_size),
 					 ring->dma_size);
-		mtk_w32(eth, next_idx, MT7628_TX_CTX_IDX0);
+		// mtk_w32(eth, next_idx, MT7628_TX_CTX_IDX0); // ORIGINAL
+
+		/* === Custom: Begin === */
+		int ctx_reg = mtk_pdma_tx_ctx_reg(soc, ring->pdma_ring_no);
+
+		if (unlikely(ctx_reg < 0))
+			return -EOPNOTSUPP;
+
+		mtk_w32(eth, next_idx, ctx_reg);
+		/* === Custom: End === */
 	}
 
 	return 0;
@@ -1788,7 +1836,11 @@ static netdev_tx_t mtk_start_xmit(struct sk_buff *skb, struct net_device *dev)
 {
 	struct mtk_mac *mac = netdev_priv(dev);
 	struct mtk_eth *eth = mac->hw;
-	struct mtk_tx_ring *ring = &eth->tx_ring;
+	// struct mtk_tx_ring *ring = &eth->tx_ring; // ORIGINAL
+
+	/* CUSTOM: Ringauswahl je MAC */
+	struct mtk_tx_ring *ring = mtk_tx_ring_for_mac(mac);
+
 	struct net_device_stats *stats = &dev->stats;
 	bool gso = false;
 	int tx_num;
@@ -2476,11 +2528,11 @@ mtk_poll_tx_done(struct mtk_eth *eth, struct mtk_poll_state *state, u8 mac,
 	state->bytes = bytes;
 }
 
-static int mtk_poll_tx_qdma(struct mtk_eth *eth, int budget,
+static int mtk_poll_tx_qdma(struct mtk_eth *eth, struct mtk_tx_ring *ring, int budget,
 			    struct mtk_poll_state *state)
 {
 	const struct mtk_reg_map *reg_map = eth->soc->reg_map;
-	struct mtk_tx_ring *ring = &eth->tx_ring;
+	// struct mtk_tx_ring *ring = &eth->tx_ring;
 	struct mtk_tx_buf *tx_buf;
 	struct xdp_frame_bulk bq;
 	struct mtk_tx_dma *desc;
@@ -2526,7 +2578,7 @@ static int mtk_poll_tx_qdma(struct mtk_eth *eth, int budget,
 	return budget;
 }
 
-static int mtk_poll_tx_pdma(struct mtk_eth *eth, int budget,
+static int mtk_poll_tx_pdma(struct mtk_eth *eth, struct mtk_tx_ring *ring, int budget,
 			    struct mtk_poll_state *state)
 {
 	struct mtk_tx_ring *ring = &eth->tx_ring;
@@ -2536,7 +2588,17 @@ static int mtk_poll_tx_pdma(struct mtk_eth *eth, int budget,
 	u32 cpu, dma;
 
 	cpu = ring->cpu_idx;
-	dma = mtk_r32(eth, MT7628_TX_DTX_IDX0);
+	// dma = mtk_r32(eth, MT7628_TX_DTX_IDX0); // Original
+
+	/* === CUSTOM: Begin === */
+	int dtx_reg = mtk_pdma_tx_dtx_reg(eth->soc, ring->pdma_ring_no);
+
+	if (unlikely(dtx_reg < 0))
+		return budget; /* oder 0 / Fehlerpfad je nach Geschmack */
+
+	dma = mtk_r32(eth, dtx_reg);
+	/* === CUSTOM: End === */
+
 	xdp_frame_bulk_init(&bq);
 
 	while ((cpu != dma) && budget) {
@@ -2564,6 +2626,7 @@ static int mtk_poll_tx_pdma(struct mtk_eth *eth, int budget,
 	return budget;
 }
 
+/* ORIGINAL
 static int mtk_poll_tx(struct mtk_eth *eth, int budget)
 {
 	struct mtk_tx_ring *ring = &eth->tx_ring;
@@ -2588,6 +2651,36 @@ static int mtk_poll_tx(struct mtk_eth *eth, int budget)
 
 	return state.total;
 }
+*/
+
+/* CUSTOM: Begin */
+static int mtk_poll_tx(struct mtk_eth *eth, int budget)
+{
+	struct mtk_tx_ring *ring_q = &eth->tx;
+	struct mtk_tx_ring *ring_p = &eth->tx_ring_pdma[0]; /* zuerst nur PDMA ring0 */
+	struct dim_sample dim_sample = {};
+	struct mtk_poll_state state = {};
+
+	/* beide Backends pollen */
+	budget = mtk_poll_tx_qdma(eth, ring_q, budget, &state);
+	budget = mtk_poll_tx_pdma(eth, ring_p, budget, &state);
+
+	if (state.txq)
+		netdev_tx_completed_queue(state.txq, state.done, state.bytes);
+
+	dim_update_sample(eth->tx_events, eth->tx_packets, eth->tx_bytes,
+			  &dim_sample);
+	net_dim(&eth->tx_dim, &dim_sample);
+
+	/* Übergangslogik: wecken, wenn mindestens ein Ring Luft hat */
+	if (mtk_queue_stopped(eth) &&
+	    (atomic_read(&ring_q->free_count) > ring_q->thresh ||
+	     atomic_read(&ring_p->free_count) > ring_p->thresh))
+		mtk_wake_queue(eth);
+
+	return state.total;
+}
+/* CUSTOM: End */
 
 static void mtk_handle_status_irq(struct mtk_eth *eth)
 {
@@ -2672,19 +2765,18 @@ static int mtk_tx_alloc(struct mtk_eth *eth)
 	int i, sz = soc->tx.desc_size;
 	struct mtk_tx_dma_v2 *txd;
 	int ring_size;
-
-	/* CUSTOM: Ringgröße von PDMA Tx-Deskriptorringe */
-	int pdma_ring_size;
-
 	u32 ofs, val;
+
+	/* CUSTOM: Begin */
+	int ring_no = 0; /* erstmal ring0 */
+	ring->pdma_ring_no = ring_no;
+	/* CUSTOM: End */
 
 	if (MTK_HAS_CAPS(soc->caps, MTK_QDMA))
 		ring_size = MTK_QDMA_RING_SIZE;
 	else
 		ring_size = soc->tx.dma_size;
 
-	/* CUSTOM: Ringgröße einen Wert zuweisen */
-	pdma_ring_size = soc->tx.dma_size;
 
 	ring->buf = kzalloc_objs(*ring->buf, ring_size);
 	if (!ring->buf)
@@ -2734,13 +2826,6 @@ static int mtk_tx_alloc(struct mtk_eth *eth)
 	ring->thresh = MAX_SKB_FRAGS;
 
 
-	for (j = 0; j < MTK_7981_PDMA_NUM_TX_waRING; j++) {
-		struct mtk_tx_ring *pdma_ring = &eth->tx_ring_pdma[j];
-
-		
-	}
-
-
 	/* make sure that all changes to the dma ring are flushed before we
 	 * continue
 	 */
@@ -2772,12 +2857,28 @@ static int mtk_tx_alloc(struct mtk_eth *eth)
 		mtk_w32(eth, val, soc->reg_map->qdma.tx_sch_rate);
 		if (mtk_is_netsys_v2_or_greater(eth))
 			mtk_w32(eth, val, soc->reg_map->qdma.tx_sch_rate + 4);
+		/* CUSTOM: Begin */
 	} else {
-		mtk_w32(eth, ring->phys_pdma, MT7628_TX_BASE_PTR0);
-		mtk_w32(eth, ring_size, MT7628_TX_MAX_CNT0);
-		mtk_w32(eth, 0, MT7628_TX_CTX_IDX0);
-		mtk_w32(eth, MT7628_PST_DTX_IDX0, soc->reg_map->pdma.rst_idx);
+		if (mtk_has_pdma_tx_ring_regs(soc->reg_map, ring_no)) {
+			mtk_w32(eth, ring->phys_pdma,
+				soc->reg_map->pdma.tx_base_ptr[ring_no]);
+			mtk_w32(eth, ring_size,
+				soc->reg_map->pdma.tx_max_cnt[ring_no]);
+			mtk_w32(eth, 0,
+				soc->reg_map->pdma.tx_ctx_idx[ring_no]);
+		} else if (MTK_HAS_CAPS(soc->caps, MTK_SOC_MT7628) && ring_no == 0) {
+			/* legacy fallback */
+			mtk_w32(eth, ring->phys_pdma, MT7628_TX_BASE_PTR0);
+			mtk_w32(eth, ring_size, MT7628_TX_MAX_CNT0);
+			mtk_w32(eth, 0, MT7628_TX_CTX_IDX0);
+			mtk_w32(eth, MT7628_PST_DTX_IDX0, soc->reg_map->pdma.rst_idx);
+		} else {
+			dev_err(eth->dev, "PDMA TX ring regs missing for ring %d\n",
+					ring_no);
+			goto no_tx_mem;
+		}
 	}
+	/* CUSTOM End */
 
 	return 0;
 
